@@ -23,6 +23,7 @@ parser.add_argument("-u", "--websocket_url", type=str, help="autobahn websocket 
 parser.add_argument("-r", "--max_runtime", type=int, help="maximum test timeout (in seconds)", default=30)
 parser.add_argument("-d", "--debug", action='store_true', help="whether to enable debugging (requires --log_autobahn)", default=False)
 parser.add_argument("-l", "--log_autobahn", action='store_true', help="whether to enable autobahn logging", default=False)
+parser.add_argument("-i", "--num_iterations", type=int, help="number of batches to perform", default=1)
 
 ARGS = parser.parse_args()
 
@@ -37,6 +38,9 @@ class SenderClientProtocol(WampClientProtocol):
         self.factory = factory
 
     def onSessionOpen(self):
+        self.publish_bundle()
+
+    def publish_bundle(self):
         # TODO(nf): Extend this stress test to use multiple channels
         uri = ARGS.topic_uri
         for i in xrange(ARGS.num_messages):
@@ -115,8 +119,12 @@ class App(object):
 
         self.numReceived = 0
         self.numReceivedPerClient = {}
-        self.connectionsLost = []
-        self.connectionsFailed = []
+        if app.iteration == 0:
+            # Don't reset data on failed connections between iterations
+            # In the future this could be configurable via a flag
+            self.connectionsLost = []
+            self.connectionsFailed = []
+
         # Either "ACTIVE" or "DONE"
         self.state = "ACTIVE"
         self.startTime = datetime.now()
@@ -124,12 +132,18 @@ class App(object):
         self.check_batchTask.start(1.0)
         self.lastResortCall = reactor.callLater(ARGS.max_runtime, self.terminate_batch)
         self.errors = {}
-        self.senders = []
+        if app.iteration == 0:
+            self.senders = []
 
-        for i in xrange(ARGS.num_senders):
-            sender = SenderClientFactory(self, clientId=i)
-            connectWS(sender, timeout=15)
-            self.senders.append(sender)
+            for i in xrange(ARGS.num_senders):
+                sender = SenderClientFactory(self, clientId=i)
+                connectWS(sender, timeout=15)
+                self.senders.append(sender)
+        else:
+            # Reuse senders between iterations (except for those that failed)
+            for sender in self.senders:
+                if sender.protocol:
+                    sender.protocol.publish_bundle()
 
     def check_batch(self):
         if self.numReceived == self.current_expected_total():
@@ -152,16 +166,19 @@ class App(object):
         self.state = "DONE"
         self.print_statistics(verbose=True)
 
-        print "BATCH CLEANUP"
-        for sender in app.senders:
-            if sender.protocol:
-                sender.protocol.sendClose()
-            sender.stopFactory()
+        if app.iteration == ARGS.num_iterations - 1:
+            print "BATCH CLEANUP"
+            for sender in app.senders:
+                if sender.protocol:
+                    sender.protocol.sendClose()
+                sender.stopFactory()
 
-        app.senders = []
-        reactor.stop()
-
-        # TODO(nf): include support for multiple test runs
+            app.senders = []
+            reactor.stop()
+        else:
+            app.iteration += 1
+            print "MOVING ON TO ITERATION %d" % app.iteration
+            reactor.callLater(2, app.init_batch)
 
     def get_complete_clients(self):
         """Return the list of client IDs whose messages we have received completely"""
@@ -242,6 +259,7 @@ if __name__ == '__main__':
 
     monitor = MonitorClientFactory(app, clientId="Monitor")
     app.monitor = monitor
+    app.iteration = 0
     connectWS(monitor)
 
     reactor.callLater(1, app.init_batch)
