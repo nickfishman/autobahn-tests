@@ -1,3 +1,4 @@
+import argparse
 import sys
 
 from twisted.python import log
@@ -9,18 +10,24 @@ from autobahn.websocket import listenWS
 from autobahn.wamp import WampServerFactory, \
                           WampServerProtocol
 
-BASE_URI = "http://autobahn-pubsub/channels/"
+parser = argparse.ArgumentParser(
+    "Basic autobahn pubsub server",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument("-b", "--base_uri", type=str, help="autobahn prefix uri to use", default="http://autobahn-pubsub/channels/")
+parser.add_argument("-d", "--debug", action='store_true', help="whether to enable debugging", default=False)
+parser.add_argument("-u", "--websocket_url", type=str, help="autobahn websocket url to use", default="ws://localhost:9000")
+
+ARGS = parser.parse_args()
 
 class PubSubServer(WampServerProtocol):
 
    def onSessionOpen(self):
-      self.registerForPubSub(BASE_URI, True)
+      self.registerForPubSub(ARGS.base_uri, True)
 
 if __name__ == '__main__':
    log.startLogging(sys.stdout)
-   debug = len(sys.argv) > 1 and sys.argv[1] == 'debug'
 
-   factory = WampServerFactory("ws://localhost:9000", debugWamp = debug)
+   factory = WampServerFactory(ARGS.websocket_url, debugWamp=ARGS.debug)
    factory.protocol = PubSubServer
    factory.setProtocolOptions(allowHixie76 = True)
    listenWS(factory)

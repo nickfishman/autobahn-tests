@@ -1,5 +1,7 @@
-import sys
+import argparse
 import random
+import sys
+
 from datetime import datetime
 
 from twisted.python import log
@@ -11,12 +13,19 @@ from autobahn.wamp import WampClientFactory, \
 
 from utils import AutoreconnectWampClientFactory
 
-CHANNEL_IDS = []
-BASE_URI = "http://autobahn-pubsub/channels/%s/stress"
-NUM_MESSAGES = 100
-NUM_SENDERS = 500
-BATCH_STATES = ("UNSTARTED", "ACTIVE", "DONE")
-MAX_RUNTIME = 30
+parser = argparse.ArgumentParser(
+    "Client that floods an autobahn pubsub server with lots of messages",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument("-m", "--num_messages", type=int, help="number of messages each client will send", default=100)
+parser.add_argument("-s", "--num_senders", type=int, help="number of sender clients", default=500)
+parser.add_argument("-t", "--topic_uri", type=str, help="autobahn topic uri to use", default="http://autobahn-pubsub/channels/1/stress")
+parser.add_argument("-u", "--websocket_url", type=str, help="autobahn websocket url to use", default="ws://localhost:9000")
+parser.add_argument("-r", "--max_runtime", type=int, help="maximum test timeout (in seconds)", default=30)
+parser.add_argument("-d", "--debug", action='store_true', help="whether to enable debugging (requires --log_autobahn)", default=False)
+parser.add_argument("-l", "--log_autobahn", action='store_true', help="whether to enable autobahn logging", default=False)
+
+ARGS = parser.parse_args()
+
 
 class SenderClientProtocol(WampClientProtocol):
     """Client protocol that connects and publishes a certain number of messages
@@ -29,18 +38,17 @@ class SenderClientProtocol(WampClientProtocol):
 
     def onSessionOpen(self):
         # TODO(nf): Extend this stress test to use multiple channels
-        for channel_id in CHANNEL_IDS:
-            uri = BASE_URI % channel_id
-            for i in xrange(NUM_MESSAGES):
-                self.publish(uri, {
-                    "number": random.random(),
-                    "clientId": self.clientId
-                })
+        uri = ARGS.topic_uri
+        for i in xrange(ARGS.num_messages):
+            self.publish(uri, {
+                "number": random.random(),
+                "clientId": self.clientId
+            })
 
 class SenderClientFactory(WampClientFactory):
 
     def __init__(self, app, clientId):
-        WampClientFactory.__init__(self, app.url, app.debugWamp)
+        WampClientFactory.__init__(self, ARGS.websocket_url, ARGS.debug)
         self.protocol = None
         self.app = app
         self.clientId = clientId
@@ -78,9 +86,8 @@ class MonitorClientProtocol(WampClientProtocol):
         self.app = self.factory.app
 
     def onSessionOpen(self):
-        for channel_id in CHANNEL_IDS:
-            uri = BASE_URI % channel_id
-            self.subscribe(uri, self.onEvent)
+        uri = ARGS.topic_uri
+        self.subscribe(uri, self.onEvent)
 
     def onEvent(self, topicUri, event):
         clientId = event["clientId"]
@@ -92,7 +99,7 @@ class MonitorClientProtocol(WampClientProtocol):
 class MonitorClientFactory(AutoreconnectWampClientFactory):
 
     def __init__(self, app, clientId):
-        WampClientFactory.__init__(self, app.url, app.debugWamp)
+        WampClientFactory.__init__(self, ARGS.websocket_url, ARGS.debug)
         self.protocol = None
         self.app = app
         self.clientId = clientId
@@ -110,15 +117,16 @@ class App(object):
         self.numReceivedPerClient = {}
         self.connectionsLost = []
         self.connectionsFailed = []
+        # Either "ACTIVE" or "DONE"
         self.state = "ACTIVE"
         self.startTime = datetime.now()
         self.check_batchTask = task.LoopingCall(self.check_batch)
         self.check_batchTask.start(1.0)
-        self.lastResortCall = reactor.callLater(MAX_RUNTIME, self.terminate_batch)
+        self.lastResortCall = reactor.callLater(ARGS.max_runtime, self.terminate_batch)
         self.errors = {}
         self.senders = []
 
-        for i in xrange(NUM_SENDERS):
+        for i in xrange(ARGS.num_senders):
             sender = SenderClientFactory(self, clientId=i)
             connectWS(sender, timeout=15)
             self.senders.append(sender)
@@ -151,12 +159,15 @@ class App(object):
             sender.stopFactory()
 
         app.senders = []
+        reactor.stop()
+
+        # TODO(nf): include support for multiple test runs
 
     def get_complete_clients(self):
         """Return the list of client IDs whose messages we have received completely"""
         complete_clients = []
         for (client_id, num_received) in app.numReceivedPerClient.items():
-            if num_received == NUM_MESSAGES:
+            if num_received == ARGS.num_messages:
                 complete_clients.append(client_id)
         return complete_clients
 
@@ -164,24 +175,24 @@ class App(object):
         """Return the list of client IDs whose messages we have NOT received completely"""
         incomplete_clients = []
         for (client_id, num_received) in app.numReceivedPerClient.items():
-            if num_received != NUM_MESSAGES:
+            if num_received != ARGS.num_messages:
                 incomplete_clients.append(client_id)
         return incomplete_clients
 
     def current_expected_total(self):
         """Return the total number of messages we're expecting to receive, taking
         into account any connection failures that we know of."""
-        max_total = NUM_SENDERS * NUM_MESSAGES
+        max_total = ARGS.num_senders * ARGS.num_messages
 
         # Messages that we'll never receive because client connections failed before sending them
-        failed_messages = NUM_MESSAGES * (len(self.connectionsFailed) + len(self.connectionsLost))
+        failed_messages = ARGS.num_messages * (len(self.connectionsFailed) + len(self.connectionsLost))
 
         return max_total - failed_messages
 
     def print_statistics(self, verbose=True):
         print datetime.now() - self.startTime
 
-        num_expected = NUM_MESSAGES * NUM_SENDERS
+        num_expected = ARGS.num_messages * ARGS.num_senders
         if verbose:
             print "STATE: %s" % self.state
             print "MESSAGE DELIVERY STATISTICS"
@@ -196,49 +207,43 @@ class App(object):
         complete_clients = self.get_complete_clients()
         if verbose:
             print "CLIENT CONNECTION STATISTICS"
-            print "\t Attempted clients: %d" % NUM_SENDERS
+            print "\t Attempted clients: %d" % ARGS.num_senders
             print "\t Clients which missed some messages: %d (%s%%)" % \
-                    (len(incomplete_clients), float(len(incomplete_clients)) / NUM_SENDERS * 100)
+                    (len(incomplete_clients), float(len(incomplete_clients)) / ARGS.num_senders * 100)
         print "\t Clients which sent all messages: %d (%s%%)" % \
-                (len(complete_clients), float(len(complete_clients)) / NUM_SENDERS * 100)
+                (len(complete_clients), float(len(complete_clients)) / ARGS.num_senders * 100)
 
         failed_clients = self.connectionsFailed + self.connectionsLost
         print "\t Clients which experienced connection failures: %s (%s%%)" % \
-                (len(failed_clients), float(len(failed_clients)) / NUM_SENDERS * 100)
-        if verbose:
+                (len(failed_clients), float(len(failed_clients)) / ARGS.num_senders * 100)
+        if verbose and (self.connectionsLost or self.connectionsFailed):
             print "\t\t Connections lost: %s" % len(self.connectionsLost)
             print "\t\t Connections failed: %s" % len(self.connectionsFailed)
 
-        unknown_clients = set(xrange(NUM_SENDERS)) - set(failed_clients) - set(incomplete_clients) - set(complete_clients)
+        unknown_clients = set(xrange(ARGS.num_senders)) - set(failed_clients) - set(incomplete_clients) - set(complete_clients)
         if unknown_clients and verbose:
             print "\t Clients unaccounted for: %s (%s%%)" % \
-                    (len(unknown_clients), float(len(unknown_clients)) / NUM_SENDERS * 100)
+                    (len(unknown_clients), float(len(unknown_clients)) / ARGS.num_senders * 100)
             print "\t\t Client IDs: %s" % sorted(list(unknown_clients))
 
-        if verbose:
+        if verbose and app.errors:
             print "ERROR INFORMATION:"
             for (error_type, count) in app.errors.items():
                 print "\t[%d] %s" % (count, error_type)
 
         print ""
+        # TODO(nf): log average # of messages received per second
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        CHANNEL_IDS = sys.argv[1].split(",")
-    else:
-        CHANNEL_IDS = ['11']
-    print "USING CHANNELS %s" % CHANNEL_IDS
-
-    #log.startLogging(sys.stdout)
+    if ARGS.log_autobahn:
+        log.startLogging(sys.stdout)
 
     app = App()
-    app.url = "ws://localhost:9000"
-    app.debugWamp = False
 
     monitor = MonitorClientFactory(app, clientId="Monitor")
     app.monitor = monitor
     connectWS(monitor)
 
-    reactor.callLater(2, app.init_batch)
+    reactor.callLater(1, app.init_batch)
 
     reactor.run()
