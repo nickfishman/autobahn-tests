@@ -16,8 +16,13 @@ Then run the stress test client (in another terminal):
 
 Test Results
 ------------
-During the stress test, the client will output statistics about the current state of the test.
-Afterwards, the client will output summary statistics, including any failures encountered.
+During the stress test, the monitor will output statistics about the current state of the test.
+Afterwards, the monitor will output summary statistics, including any failures encountered.
+
+The monitor dynamically adjusts its expectations of how many messages to receive in response to
+failures reported by the clients. For example, if the stress test is run with 500 senders sending 100
+messages each, and 10 of those senders report connection errors, the monitor will expect
+49000 ((500 - 10) * 100) messages instead of 50,000.
 
 Configuration
 -------------
