@@ -24,6 +24,7 @@ parser.add_argument("-r", "--max_runtime", type=int, help="maximum test timeout 
 parser.add_argument("-d", "--debug", action='store_true', help="whether to enable debugging (requires --log_autobahn)", default=False)
 parser.add_argument("-l", "--log_autobahn", action='store_true', help="whether to enable autobahn logging", default=False)
 parser.add_argument("-i", "--num_iterations", type=int, help="number of batches to perform", default=1)
+parser.add_argument("--websocket_timeout", type=int, help="websocket connection timeout (in seconds)", default=30)
 
 ARGS = parser.parse_args()
 
@@ -137,7 +138,7 @@ class App(object):
 
             for i in xrange(ARGS.num_senders):
                 sender = SenderClientFactory(self, clientId=i)
-                connectWS(sender, timeout=15)
+                connectWS(sender, timeout=ARGS.websocket_timeout)
                 self.senders.append(sender)
         else:
             # Reuse senders between iterations (except for those that failed)
